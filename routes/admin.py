@@ -2,6 +2,7 @@
 """管理员模块：仪表盘统计、用户管理、内容管理（表白/评论）、系统设置"""
 from flask import Blueprint, g, request
 
+from common.assets import delete_confession_images
 from common.confession_queries import query_confessions
 from common.db import execute, query_all, query_one
 from common.decorators import require_admin
@@ -32,7 +33,8 @@ def stats():
         SELECT c.*,
                (SELECT COUNT(*) FROM likes l WHERE l.confession_id = c.id) AS like_count,
                (SELECT COUNT(*) FROM comments cm WHERE cm.confession_id = c.id) AS comment_count,
-               '[]' AS likes_json
+               (SELECT COALESCE(json_group_array(l2.user_id), '[]')
+                  FROM likes l2 WHERE l2.confession_id = c.id) AS likes_json
         FROM confessions c
         ORDER BY like_count DESC, c.created_at DESC LIMIT 5''')
     return ok({
@@ -195,10 +197,11 @@ def set_confession_status(confession_id):
 @bp.delete('/confessions/<confession_id>')
 @require_admin
 def remove_confession(confession_id):
-    """删除单条表白（级联删除其评论与点赞）"""
-    row = query_one('SELECT id FROM confessions WHERE id = ?', (confession_id,))
+    """删除单条表白（级联删除其评论、点赞与图片文件）"""
+    row = query_one('SELECT * FROM confessions WHERE id = ?', (confession_id,))
     if not row:
         return fail('表白不存在', http=404)
+    delete_confession_images(row)
     execute('DELETE FROM confessions WHERE id = ?', (confession_id,))
     return ok(message='表白已删除')
 
@@ -211,6 +214,9 @@ def batch_remove_confessions():
     if not isinstance(ids, list) or not ids:
         return fail('请提供要删除的 id 数组')
     marks = ','.join('?' * len(ids))
+    rows = query_all(f'SELECT * FROM confessions WHERE id IN ({marks})', ids)
+    for row in rows:
+        delete_confession_images(row)
     n = execute(f'DELETE FROM confessions WHERE id IN ({marks})', ids)
     return ok({'deleted': n}, message=f'已删除 {n} 条表白')
 

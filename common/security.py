@@ -77,11 +77,12 @@ def decode_token(token: str):
 
 
 def revoke_token(payload: dict):
-    """登出吊销：把 jti 写入黑名单，存活至 token 自然过期"""
+    """登出吊销：把 jti 写入黑名单，存活至 token 自然过期；顺手清理已过期黑名单"""
     if payload and payload.get('jti'):
         from common.db import execute
         execute('INSERT OR IGNORE INTO token_blacklist (jti, expires_at) VALUES (?, ?)',
                 (payload['jti'], payload.get('exp', int(time.time()))))
+        execute('DELETE FROM token_blacklist WHERE expires_at < ?', (int(time.time()),))
 
 
 def make_reset_token(user_id: str, minutes: int) -> str:

@@ -31,7 +31,7 @@ def close_db(_e=None):
 
 
 def init_db(app):
-    """应用启动时：确保目录存在、开启 WAL、建表"""
+    """应用启动时：确保目录存在、开启 WAL、建表、轻量迁移"""
     os.makedirs(os.path.dirname(app.config['DATABASE_PATH']) or '.', exist_ok=True)
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     conn = _connect(app.config['DATABASE_PATH'])
@@ -39,9 +39,17 @@ def init_db(app):
         conn.execute('PRAGMA journal_mode = WAL')
         with open(SCHEMA_FILE, 'r', encoding='utf-8') as f:
             conn.executescript(f.read())
+        _migrate_columns(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_columns(conn):
+    """SQLite 无 IF NOT EXISTS 加列语法：手动检测缺失列并 ALTER（幂等）"""
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(email_codes)').fetchall()}
+    if cols and 'attempts' not in cols:
+        conn.execute('ALTER TABLE email_codes ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
 
 
 def query_all(sql, args=()):

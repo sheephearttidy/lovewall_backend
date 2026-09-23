@@ -96,8 +96,9 @@ def main():
         conn.executescript(f.read())
 
     if force:
-        for t in ('users', 'confessions', 'likes', 'comments',
-                  'notifications', 'settings', 'email_codes', 'captchas', 'token_blacklist'):
+        for t in ('users', 'confessions', 'likes', 'comments', 'notifications',
+                  'settings', 'email_codes', 'captchas', 'token_blacklist',
+                  'forgot_logs', 'used_reset_tokens'):
             conn.execute(f'DELETE FROM {t}')
 
     now = int(time.time() * 1000)

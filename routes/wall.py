@@ -9,6 +9,7 @@ import time
 
 from flask import Blueprint, current_app, g, request, send_from_directory
 
+from common.assets import delete_confession_images
 from common.confession_queries import get_confession_detail, query_confessions
 from common.db import execute, query_one
 from common.decorators import require_login
@@ -170,12 +171,13 @@ def add_confession():
 @bp.delete('/confessions/<confession_id>')
 @require_login
 def delete_own_confession(confession_id):
-    """删除自己发布的表白（物理删除，含其全部评论与点赞）"""
+    """删除自己发布的表白（物理删除，含其全部评论、点赞与图片文件）"""
     row = query_one('SELECT * FROM confessions WHERE id = ?', (confession_id,))
     if not row:
         return fail('表白不存在', http=404)
     if row['author_id'] != g.user['id']:
         return fail('只能删除自己发布的表白', http=403)
+    delete_confession_images(row)
     execute('DELETE FROM confessions WHERE id = ?', (confession_id,))
     return ok(message='删除成功')
 

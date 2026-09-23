@@ -25,14 +25,22 @@ bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
 # ---------------- 邮箱验证码 ----------------
 
+EMAIL_CODE_MAX_ATTEMPTS = 5  # 校验失败达 5 次即销毁验证码（防 6 位码暴力枚举）
+
+
 def _consume_email_code(email: str, code: str):
-    """校验并一次性销毁验证码；返回错误文案或 None"""
+    """校验并一次性销毁验证码；失败计数，达上限销毁。返回错误文案或 None"""
     row = query_one('SELECT * FROM email_codes WHERE email = ?', (email,))
     if not row or not code:
         return '请先获取邮箱验证码'
     if row['expires_at'] < int(time.time() * 1000):
         return '验证码已过期，请重新获取'
-    if row['code'] != str(code).strip():
+    if str(code).strip() != row['code']:
+        attempts = (row['attempts'] or 0) + 1
+        if attempts >= EMAIL_CODE_MAX_ATTEMPTS:
+            execute('DELETE FROM email_codes WHERE email = ?', (email,))
+            return '验证码错误次数过多，请重新获取'
+        execute('UPDATE email_codes SET attempts = ? WHERE email = ?', (attempts, email))
         return '邮箱验证码错误'
     execute('DELETE FROM email_codes WHERE email = ?', (email,))
     return None
@@ -220,16 +228,62 @@ def session_info():
 
 # ---------------- 找回密码（三步流程） ----------------
 
+FORGOT_COOLDOWN_MS = 60 * 1000        # 同一用户名 60s 内只能尝试一次 verify
+FORGOT_MAX_FAILS = 5                  # 连续失败 5 次锁定
+FORGOT_LOCK_MS = 15 * 60 * 1000       # 锁定 15 分钟
+
+
+def _forgot_gate(username: str):
+    """verify 前置闸门：60s 冷却 + 失败锁定。返回错误文案或 None"""
+    now = int(time.time() * 1000)
+    row = query_one('SELECT * FROM forgot_logs WHERE username = ?', (username,))
+    if not row:
+        return None
+    if row['locked_until'] > now:
+        remain = int((row['locked_until'] - now) / 60000) + 1
+        return f'尝试次数过多，请 {remain} 分钟后再试'
+    if now - row['last_at'] < FORGOT_COOLDOWN_MS:
+        remain = int((FORGOT_COOLDOWN_MS - (now - row['last_at'])) / 1000) + 1
+        return f'操作太频繁，请 {remain} 秒后再试'
+    return None
+
+
+def _forgot_record(username: str, success: bool):
+    """记录 verify 结果：成功清零失败计数，失败累计并可能锁定"""
+    now = int(time.time() * 1000)
+    if success:
+        execute('INSERT INTO forgot_logs (username, last_at, fails, locked_until) VALUES (?,?,0,0) '
+                'ON CONFLICT(username) DO UPDATE SET last_at = excluded.last_at,'
+                ' fails = 0, locked_until = 0', (username, now))
+        return
+    row = query_one('SELECT fails FROM forgot_logs WHERE username = ?', (username,))
+    fails = ((row['fails'] if row else 0) or 0) + 1
+    locked_until = now + FORGOT_LOCK_MS if fails >= FORGOT_MAX_FAILS else 0
+    execute('INSERT INTO forgot_logs (username, last_at, fails, locked_until) VALUES (?,?,?,?) '
+            'ON CONFLICT(username) DO UPDATE SET last_at = excluded.last_at,'
+            ' fails = excluded.fails, locked_until = excluded.locked_until',
+            (username, now, fails, locked_until))
+
+
 @bp.post('/forgot/verify')
 def forgot_verify():
-    """第一步：校验用户名与绑定邮箱匹配，返回脱敏信息 + 一次性重置凭证"""
+    """第一步：校验用户名与绑定邮箱匹配，返回脱敏信息 + 一次性重置凭证
+    安全闸门：同用户名 60s 冷却；连续失败 5 次锁 15 分钟（防用户名/邮箱枚举）"""
     data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     email = (data.get('email') or '').strip()
     if not username or not email:
         return fail('请填写用户名和邮箱')
 
+    err = _forgot_gate(username)
+    if err:
+        return fail(err, http=429)
+
     user = query_one('SELECT * FROM users WHERE username = ?', (username,))
+    matched = bool(user and user['email'] and user['email'].lower() == email.lower()
+                   and user['status'] == 'active')
+    _forgot_record(username, matched)
+
     if not user or not user['email'] or user['email'].lower() != email.lower():
         return fail('用户名与邮箱不匹配')
     if user['status'] != 'active':
@@ -246,7 +300,8 @@ def forgot_verify():
 
 @bp.post('/forgot/reset')
 def forgot_reset():
-    """第三步：携带重置凭证 + 邮箱验证码设置新密码（视图层保证验证码通过后调用）"""
+    """第三步：携带一次性重置凭证 + 邮箱验证码设置新密码
+    安全约束：resetToken 用后即焚；邮箱验证码 5 次尝试限制"""
     data = request.get_json(silent=True) or {}
     user_id = data.get('userId')
     reset_token = data.get('resetToken') or ''
@@ -256,6 +311,9 @@ def forgot_reset():
     payload = decode_reset_token(reset_token)
     if not payload or payload.get('sub') != user_id:
         return fail('重置凭证已失效，请重新验证', http=403)
+    used = query_one('SELECT 1 AS x FROM used_reset_tokens WHERE jti = ?', (payload.get('jti'),))
+    if used:
+        return fail('重置凭证已使用，请重新验证', http=403)
 
     user = query_one('SELECT * FROM users WHERE id = ?', (user_id,))
     if not user:
@@ -265,11 +323,15 @@ def forgot_reset():
     if err:
         return fail(err)
 
-    # 邮箱验证码：一次性销毁
+    # 邮箱验证码：一次性销毁，失败计数
     err = _consume_email_code(user['email'], email_code)
     if err:
         return fail(err, http=403)
 
+    # 凭证用后即焚（先写黑名单再改密码，保证原子性语义）
+    execute('INSERT INTO used_reset_tokens (jti, expires_at) VALUES (?, ?)',
+            (payload['jti'], payload.get('exp', int(time.time()))))
+    execute('DELETE FROM used_reset_tokens WHERE expires_at < ?', (int(time.time()),))
     execute('UPDATE users SET password_hash = ? WHERE id = ?',
             (hash_password(new_password), user_id))
     return ok(message='密码重置成功，请使用新密码登录')

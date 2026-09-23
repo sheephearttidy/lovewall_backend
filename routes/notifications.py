@@ -33,10 +33,13 @@ def my_notifications():
 
 
 def execute_and_fetch(uid, page, page_size):
+    """联表 users 实时取触发者昵称（改名即生效）；用户已删除时回落写时快照"""
     from common.db import query_all
     return query_all(
-        'SELECT * FROM notifications WHERE to_user_id = ? ORDER BY created_at DESC'
-        ' LIMIT ? OFFSET ?', (uid, page_size, (page - 1) * page_size))
+        '''SELECT nt.*, COALESCE(u.nickname, nt.from_nickname, '未知用户') AS from_nickname
+           FROM notifications nt LEFT JOIN users u ON u.id = nt.from_user_id
+           WHERE nt.to_user_id = ? ORDER BY nt.created_at DESC
+           LIMIT ? OFFSET ?''', (uid, page_size, (page - 1) * page_size))
 
 
 @bp.put('/read-all')

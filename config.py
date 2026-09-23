@@ -6,7 +6,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---------- 基础 ----------
 SECRET_KEY = os.environ.get('LOVEWALL_SECRET_KEY', 'lovewall-dev-secret-change-me')
-JSON_AS_ASCII = False  # 中文原样输出
+
+# ---------- 请求体上限 ----------
+# 3 张图 × 6MB 解码后 → base64 体积约 8.2MB/张，加 JSON 开销取 30MB 余量
+# 超限返回 413，防止伪造巨型请求在业务校验前耗尽内存
+MAX_CONTENT_LENGTH = 30 * 1024 * 1024
 
 # ---------- 数据库（SQLite） ----------
 DATABASE_PATH = os.environ.get('LOVEWALL_DB', os.path.join(BASE_DIR, 'lovewall.db'))

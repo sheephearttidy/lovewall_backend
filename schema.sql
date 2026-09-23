@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS email_codes (
   email      TEXT PRIMARY KEY,
   code       TEXT NOT NULL,                        -- 6 位数字
   expires_at INTEGER NOT NULL,
-  sent_at    INTEGER NOT NULL
+  sent_at    INTEGER NOT NULL,
+  attempts   INTEGER NOT NULL DEFAULT 0            -- 校验失败计数，达 5 次销毁验证码
 );
 
 CREATE TABLE IF NOT EXISTS captchas (
@@ -90,5 +91,18 @@ CREATE TABLE IF NOT EXISTS captchas (
 
 CREATE TABLE IF NOT EXISTS token_blacklist (
   jti        TEXT PRIMARY KEY,                     -- 登出吊销的 JWT ID
+  expires_at INTEGER NOT NULL
+);
+
+-- 找回密码安全表
+CREATE TABLE IF NOT EXISTS forgot_logs (
+  username  TEXT PRIMARY KEY,
+  last_at   INTEGER NOT NULL DEFAULT 0,            -- 最近一次 verify 尝试时间（60s 冷却）
+  fails     INTEGER NOT NULL DEFAULT 0,            -- 连续失败次数，达 5 次锁 15 分钟
+  locked_until INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS used_reset_tokens (
+  jti        TEXT PRIMARY KEY,                     -- 已使用的找回密码重置凭证（一次性）
   expires_at INTEGER NOT NULL
 );
